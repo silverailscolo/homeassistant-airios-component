@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import typing
 from dataclasses import dataclass
-from typing import Any, cast, final
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import (
-    CONF_ADDRESS,
+    CONCENTRATION_PARTS_PER_MILLION,
     PERCENTAGE,
     REVOLUTIONS_PER_MINUTE,
     EntityCategory,
@@ -22,24 +22,25 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
-from homeassistant.helpers import entity_platform
-from homeassistant.helpers.typing import StateType
 from pyairios.constants import (
-    ProductId,
-    ResetMode,
     VMDBypassPosition,
+    VMDCO2Level,
     VMDErrorCode,
     VMDHeater,
     VMDHeaterStatus,
     VMDSensorStatus,
     VMDTemperature,
 )
-from pyairios.exceptions import AiriosException
+from pyairios.properties import (
+    AiriosBridgeProperty,
+    AiriosVMDProperty,
+)
 
-from .coordinator import AiriosDataUpdateCoordinator
-from .entity import AiriosEntity
-from .services import SERVICE_DEVICE_RESET, SERVICE_FACTORY_RESET
+from .entity import (
+    AiriosEntity,
+    AiriosEntityDescription,
+    find_matching_subentry,
+)
 
 if typing.TYPE_CHECKING:
     from collections.abc import Callable
@@ -48,8 +49,6 @@ if typing.TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry, ConfigSubentry
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
     from homeassistant.helpers.typing import StateType
-    from pyairios import BRDG02R13
-    from pyairios.data_model import AiriosNodeData
 
     from .coordinator import AiriosDataUpdateCoordinator
 
@@ -59,7 +58,7 @@ PARALLEL_UPDATES = 0
 
 
 @dataclass(frozen=True, kw_only=True)
-class AiriosSensorEntityDescription(SensorEntityDescription):
+class AiriosSensorEntityDescription(AiriosEntityDescription, SensorEntityDescription):
     """Airios sensor description."""
 
     value_fn: Callable[[Any], StateType] | None = None
@@ -104,6 +103,13 @@ def bypass_position_value_fn(v: VMDBypassPosition) -> StateType:
     return None
 
 
+def co2_value_fn(v: VMDCO2Level) -> StateType:
+    """Convert VMDCO2Level to sensor's value."""
+    if v.status == VMDSensorStatus.OK:
+        return v.co2
+    return None
+
+
 def override_remaining_time_value_fn(v: int) -> StateType:
     """Entity return not available when 0."""
     if v == 0:
@@ -118,9 +124,10 @@ def postheater_value_fn(v: VMDHeater) -> StateType:
     return None
 
 
-BRIDGE_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
+SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
     AiriosSensorEntityDescription(
-        key="rf_load_last_hour",
+        ap=AiriosBridgeProperty.RF_LOAD_LAST_HOUR,
+        key=AiriosBridgeProperty.RF_LOAD_LAST_HOUR.name.casefold(),
         translation_key="rf_load_last_hour",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -129,7 +136,8 @@ BRIDGE_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
         entity_registry_enabled_default=False,
     ),
     AiriosSensorEntityDescription(
-        key="rf_load_current_hour",
+        ap=AiriosBridgeProperty.RF_LOAD_CURRENT_HOUR,
+        key=AiriosBridgeProperty.RF_LOAD_CURRENT_HOUR.name.casefold(),
         translation_key="rf_load_current_hour",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -137,33 +145,33 @@ BRIDGE_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
         suggested_display_precision=2,
     ),
     AiriosSensorEntityDescription(
-        key="rf_sent_messages_last_hour",
+        ap=AiriosBridgeProperty.MESSAGES_SEND_LAST_HOUR,
+        key=AiriosBridgeProperty.MESSAGES_SEND_LAST_HOUR.name.casefold(),
         translation_key="rf_sent_messages_last_hour",
         state_class=SensorStateClass.TOTAL_INCREASING,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
     ),
     AiriosSensorEntityDescription(
-        key="rf_sent_messages_current_hour",
+        ap=AiriosBridgeProperty.MESSAGES_SEND_CURRENT_HOUR,
+        key=AiriosBridgeProperty.MESSAGES_SEND_CURRENT_HOUR.name.casefold(),
         translation_key="rf_sent_messages_current_hour",
         state_class=SensorStateClass.TOTAL_INCREASING,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     AiriosSensorEntityDescription(
-        key="power_on_time",
+        ap=AiriosBridgeProperty.UPTIME,
+        key=AiriosBridgeProperty.UPTIME.name.casefold(),
         translation_key="power_on_time",
         entity_category=EntityCategory.DIAGNOSTIC,
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfTime.SECONDS,
         suggested_unit_of_measurement=UnitOfTime.DAYS,
-        value_fn=power_on_time_value_fn,
     ),
-)
-
-VMD_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
     AiriosSensorEntityDescription(
-        key="indoor_air_temperature",
+        ap=AiriosVMDProperty.TEMPERATURE_EXHAUST,
+        key=AiriosVMDProperty.TEMPERATURE_EXHAUST.name.casefold(),
         translation_key="indoor_air_temperature",
         state_class=SensorStateClass.MEASUREMENT,
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -172,7 +180,8 @@ VMD_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
         value_fn=temperature_value_fn,
     ),
     AiriosSensorEntityDescription(
-        key="outdoor_air_temperature",
+        ap=AiriosVMDProperty.TEMPERATURE_INLET,
+        key=AiriosVMDProperty.TEMPERATURE_INLET.name.casefold(),
         translation_key="outdoor_air_temperature",
         state_class=SensorStateClass.MEASUREMENT,
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -181,7 +190,8 @@ VMD_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
         value_fn=temperature_value_fn,
     ),
     AiriosSensorEntityDescription(
-        key="exhaust_air_temperature",
+        ap=AiriosVMDProperty.TEMPERATURE_OUTLET,
+        key=AiriosVMDProperty.TEMPERATURE_OUTLET.name.casefold(),
         translation_key="exhaust_air_temperature",
         state_class=SensorStateClass.MEASUREMENT,
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -190,7 +200,8 @@ VMD_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
         value_fn=temperature_value_fn,
     ),
     AiriosSensorEntityDescription(
-        key="supply_air_temperature",
+        ap=AiriosVMDProperty.TEMPERATURE_SUPPLY,
+        key=AiriosVMDProperty.TEMPERATURE_SUPPLY.name.casefold(),
         translation_key="supply_air_temperature",
         state_class=SensorStateClass.MEASUREMENT,
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -199,35 +210,40 @@ VMD_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
         value_fn=temperature_value_fn,
     ),
     AiriosSensorEntityDescription(
-        key="exhaust_fan_rpm",
+        ap=AiriosVMDProperty.FAN_RPM_EXHAUST,
+        key=AiriosVMDProperty.FAN_RPM_EXHAUST.name.casefold(),
         translation_key="exhaust_fan_rpm",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=REVOLUTIONS_PER_MINUTE,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     AiriosSensorEntityDescription(
-        key="supply_fan_rpm",
+        ap=AiriosVMDProperty.FAN_RPM_SUPPLY,
+        key=AiriosVMDProperty.FAN_RPM_SUPPLY.name.casefold(),
         translation_key="supply_fan_rpm",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=REVOLUTIONS_PER_MINUTE,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     AiriosSensorEntityDescription(
-        key="supply_fan_speed",
+        ap=AiriosVMDProperty.FAN_SPEED_SUPPLY,
+        key=AiriosVMDProperty.FAN_SPEED_SUPPLY.name.casefold(),
         translation_key="supply_fan_speed",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         suggested_display_precision=0,
     ),
     AiriosSensorEntityDescription(
-        key="exhaust_fan_speed",
+        ap=AiriosVMDProperty.FAN_SPEED_EXHAUST,
+        key=AiriosVMDProperty.FAN_SPEED_EXHAUST.name.casefold(),
         translation_key="exhaust_fan_speed",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         suggested_display_precision=0,
     ),
     AiriosSensorEntityDescription(
-        key="error_code",
+        ap=AiriosVMDProperty.ERROR_CODE,
+        key=AiriosVMDProperty.ERROR_CODE.name.casefold(),
         translation_key="error_code",
         entity_category=EntityCategory.DIAGNOSTIC,
         device_class=SensorDeviceClass.ENUM,
@@ -235,7 +251,8 @@ VMD_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
         value_fn=error_code_value_fn,
     ),
     AiriosSensorEntityDescription(
-        key="filter_duration_days",
+        ap=AiriosVMDProperty.FILTER_DURATION,
+        key=AiriosVMDProperty.FILTER_DURATION.name.casefold(),
         translation_key="filter_duration_days",
         native_unit_of_measurement=UnitOfTime.DAYS,
         device_class=SensorDeviceClass.DURATION,
@@ -243,37 +260,61 @@ VMD_SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     AiriosSensorEntityDescription(
-        key="filter_remaining_percent",
+        ap=AiriosVMDProperty.FILTER_REMAINING_PERCENT,
+        key=AiriosVMDProperty.FILTER_REMAINING_PERCENT.name.casefold(),
         translation_key="filter_remaining_percent",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         suggested_display_precision=0,
     ),
     AiriosSensorEntityDescription(
-        key="bypass_position",
+        ap=AiriosVMDProperty.BYPASS_POSITION,
+        key=AiriosVMDProperty.BYPASS_POSITION.name.casefold(),
         translation_key="bypass_position",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         value_fn=bypass_position_value_fn,
     ),
     AiriosSensorEntityDescription(
-        key="postheater",
+        ap=AiriosVMDProperty.POSTHEATER,
+        key=AiriosVMDProperty.POSTHEATER.name.casefold(),
         translation_key="postheater",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         value_fn=postheater_value_fn,
     ),
     AiriosSensorEntityDescription(
-        key="override_remaining_time",
+        ap=AiriosVMDProperty.VENTILATION_SPEED_OVERRIDE_REMAINING_TIME,
+        key=AiriosVMDProperty.VENTILATION_SPEED_OVERRIDE_REMAINING_TIME.name.casefold(),
         translation_key="override_remaining_time",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTime.MINUTES,
         value_fn=override_remaining_time_value_fn,
     ),
+    # VMD07-RP13 specific
+    AiriosSensorEntityDescription(
+        ap=AiriosVMDProperty.CO2_LEVEL,
+        key=AiriosVMDProperty.CO2_LEVEL.name.casefold(),
+        translation_key="co2_level",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=CONCENTRATION_PARTS_PER_MILLION,
+        value_fn=co2_value_fn,
+    ),
+    AiriosSensorEntityDescription(
+        ap=AiriosVMDProperty.CO2_CONTROL_SETPOINT,
+        key=AiriosVMDProperty.CO2_CONTROL_SETPOINT.name.casefold(),
+        translation_key="co2_setpoint",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=CONCENTRATION_PARTS_PER_MILLION,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
 )
 
 
-class AiriosSensorEntity(AiriosEntity, SensorEntity):
+class AiriosSensorEntity(  # pyright: ignore[reportIncompatibleVariableOverride]
+    AiriosEntity,
+    SensorEntity,
+):
     """Airios sensor."""
 
     entity_description: AiriosSensorEntityDescription
@@ -282,84 +323,40 @@ class AiriosSensorEntity(AiriosEntity, SensorEntity):
         self,
         description: AiriosSensorEntityDescription,
         coordinator: AiriosDataUpdateCoordinator,
-        node: AiriosNodeData,
-        via_config_entry: ConfigEntry | None,
+        modbus_address: int,
         subentry: ConfigSubentry | None,
     ) -> None:
         """Initialize the Airios sensor entity."""
-        super().__init__(description.key, coordinator, node, via_config_entry, subentry)
-        self.entity_description = description
+        super().__init__(description.key, coordinator, modbus_address, subentry)
+        self.entity_description = description  # type: ignore[override]
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle update data from the coordinator."""
-        _LOGGER.debug(
-            "Handle update for node %s sensor %s",
-            f"{self.rf_address}",
-            self.entity_description.key,
-        )
         try:
-            device = self.coordinator.data.nodes[self.modbus_address]
-            result = device[self.entity_description.key]
-            _LOGGER.debug(
-                "Node %s, sensor %s, result %s",
+            result = self.fetch_result()
+            if self.entity_description.value_fn:
+                self._attr_native_value = self.entity_description.value_fn(result.value)
+            else:
+                self._attr_native_value = result.value
+            self._attr_available = self._attr_native_value is not None
+            if result.status is not None:
+                self.set_extra_state_attributes_internal(result.status)
+        except (TypeError, ValueError) as ex:
+            _LOGGER.info(
+                "Failed to update sensor entity for node=%s, property=%s: %s",
                 f"0x{self.rf_address:08X}",
                 self.entity_description.key,
-                result,
-            )
-            if result is not None and result.value is not None:
-                if self.entity_description.value_fn:
-                    self._attr_native_value = self.entity_description.value_fn(
-                        result.value
-                    )
-                else:
-                    self._attr_native_value = result.value
-                self._attr_available = self._attr_native_value is not None
-                if result.status is not None:
-                    self.set_extra_state_attributes_internal(result.status)
-
-        except (TypeError, ValueError):
-            _LOGGER.exception(
-                "Failed to update node %s sensor %s",
-                f"0x{self.rf_address:08X}",
-                self.entity_description.key,
+                ex,
             )
             self._attr_native_value = None
             self._attr_available = False
         finally:
             self.async_write_ha_state()
 
-    @final
-    async def async_device_reset(self) -> bool:
-        """Reset the bridge."""
-        node = cast("BRDG02R13", await self.api().node(self.modbus_address))
-        _LOGGER.info("Reset node %s", str(node))
-        try:
-            if not await node.reset(ResetMode.SOFT_RESET):
-                msg = "Failed to reset device"
-                raise HomeAssistantError(msg)
-        except AiriosException as ex:
-            msg = f"Failed to reset device: {ex}"
-            raise HomeAssistantError(msg) from ex
-        return True
-
-    @final
-    async def async_factory_reset(self) -> bool:
-        """Reset the bridge."""
-        node = cast("BRDG02R13", await self.api().node(self.modbus_address))
-        _LOGGER.info("Factory reset node %s", str(node))
-        try:
-            if not await node.reset(ResetMode.FACTORY_RESET):
-                msg = "Failed to factory reset device"
-                raise HomeAssistantError(msg)
-        except AiriosException as ex:
-            msg = f"Failed to factory reset device: {ex}"
-            raise HomeAssistantError(msg) from ex
-        return True
-
 
 async def async_setup_entry(
-    hass: HomeAssistant,  # noqa: ARG001
+    hass: HomeAssistant,  # noqa: ARG001 # pylint: disable=unused-argument
     entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
@@ -367,50 +364,11 @@ async def async_setup_entry(
     coordinator: AiriosDataUpdateCoordinator = entry.runtime_data
 
     for modbus_address, node in coordinator.data.nodes.items():
-        # Find matching subentry
-        subentry_id = None
-        subentry = None
-        via_config_entry = None
-        for se_id, se in entry.subentries.items():
-            if se.data[CONF_ADDRESS] == modbus_address:
-                subentry_id = se_id
-                subentry = se
-                via_config_entry = entry
-
-        result = node["product_id"]
-        if result is None or result.value is None:
-            msg = "Failed to fetch product id from node"
-            raise ConfigEntryNotReady(msg)
-
-        entities: list[AiriosSensorEntity] = []
-        if result.value == ProductId.BRDG_02R13:
-            entities.extend(
-                [
-                    AiriosSensorEntity(
-                        description, coordinator, node, via_config_entry, subentry
-                    )
-                    for description in BRIDGE_SENSOR_ENTITIES
-                ]
-            )
-        elif result.value == ProductId.VMD_02RPS78:
-            entities.extend(
-                [
-                    AiriosSensorEntity(
-                        description, coordinator, node, via_config_entry, subentry
-                    )
-                    for description in VMD_SENSOR_ENTITIES
-                ]
-            )
+        subentry = find_matching_subentry(entry, modbus_address)
+        entities: list[AiriosSensorEntity] = [
+            AiriosSensorEntity(description, coordinator, modbus_address, subentry)
+            for description in SENSOR_ENTITIES
+            if description.ap in node
+        ]
+        subentry_id = subentry.subentry_id if subentry else None
         async_add_entities(entities, config_subentry_id=subentry_id)
-
-    platform = entity_platform.async_get_current_platform()
-    platform.async_register_entity_service(
-        SERVICE_DEVICE_RESET,
-        None,
-        "async_device_reset",
-    )
-    platform.async_register_entity_service(
-        SERVICE_FACTORY_RESET,
-        None,
-        "async_factory_reset",
-    )

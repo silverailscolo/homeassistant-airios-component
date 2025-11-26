@@ -101,8 +101,7 @@
           "data": {
             "name": "Name",
             "device": "Product to bind",
-            "rf_address": "Serial Number (optional)",
-            "controller_serial_number": "Controller to bind the accessory to"
+            "address": "Controller to bind the accessory to"
           }
         },
         "do_bind_accessory": {
@@ -135,10 +134,12 @@
       "init": {
         "title": "Airios integration options",
         "data": {
-          "scan_interval": "Scan interval (seconds)"
+          "scan_interval": "Scan interval (seconds)",
+          "fetch_result_status": "Fetch result metadata"
         },
         "data_description": {
-          "scan_interval": "Poll interval in seconds"
+          "scan_interval": "Poll interval in seconds",
+          "fetch_result_status": "Fetch the metadata associated to each device register value. Enabling this option significantly increses device poll time."
         }
       }
     }
@@ -199,6 +200,13 @@
       },
       "defrost": {
         "name": "Defrost"
+      },
+      "basic_vent_enable": {
+        "name": "Base ventilation",
+        "state": {
+          "off": "Off",
+          "on": "On"
+        }
       }
     },
     "button": {
@@ -246,6 +254,12 @@
       "exhaust_fan_speed": {
         "name": "Exhaust fan speed"
       },
+      "co2_level": {
+        "name": "Current CO2 level"
+      },
+      "co2_setpoint": {
+        "name": "CO2 Setpoint"
+      },
       "error_code": {
         "name": "Error code",
         "state": {
@@ -290,6 +304,14 @@
       },
       "frost_protection_preheater_setpoint": {
         "name": "Frost protection preheater setpoint"
+      },
+      "co2_setpoint": {
+        "name": "CO2 setpoint"
+      }
+    },
+    "switch": {
+      "basic_vent_enable_sw": {
+        "name": "Base ventilation"
       }
     }
   },
@@ -370,11 +392,34 @@
     },
     "device_reset": {
       "name": "Reset the device",
-      "description": "Resets the device preserving the configuration."
+      "description": "Resets the device preserving the configuration.",
+      "fields": {
+        "device_id": {
+          "description": "The Airios device to reset",
+          "name": "Target device"
+        }
+      }
     },
     "factory_reset": {
       "name": "Factory reset the device",
-      "description": "Resets the device to factory state."
+      "description": "Resets the device to factory state.",
+      "fields": {
+        "device_id": {
+          "description": "The Airios device to reset",
+          "name": "Target device"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_device_entry": {
+      "message": "Airios service {service_name} error: device not found in device registry."
+    },
+    "invalid_bridge_rf_address": {
+      "message": "Airios service {service_name} error: Invalid bridge RF address {rf_address}."
+    },
+    "invalid_config_entry": {
+      "message": "Airios service {service_name} error: Config entry not found or not loaded."
     }
   }
 }

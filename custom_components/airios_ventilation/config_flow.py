@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import typing
-from typing import Any
+from typing import Any, Self
 
 import serial
 import serial.tools.list_ports
@@ -32,10 +32,12 @@ from homeassistant.const import (
 )
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
-from pyairios import Airios, AiriosException, AiriosRtuTransport, AiriosTcpTransport
-from pyairios.constants import BindingStatus
-from pyairios.exceptions import AiriosBindingException
-from pyairios.node import ProductId
+from homeassistant.helpers import device_registry as dr
+from pyairios import Airios
+from pyairios.client import AiriosRtuTransport, AiriosTcpTransport
+from pyairios.constants import AiriosDeviceType, BindingStatus, ProductId
+from pyairios.exceptions import AiriosBindingException, AiriosException
+from pyairios.models.factory import factory
 
 from .const import (
     CONF_BRIDGE_RF_ADDRESS,
@@ -43,11 +45,11 @@ from .const import (
     CONF_DEFAULT_NETWORK_MODBUS_ADDRESS,
     CONF_DEFAULT_PORT,
     CONF_DEFAULT_SERIAL_MODBUS_ADDRESS,
+    CONF_FETCH_RESULT_STATUS,
     CONF_RF_ADDRESS,
+    DEFAULT_FETCH_RESULT_STATUS,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
-    SUPPORTED_ACCESSORIES,
-    SUPPORTED_UNITS,
     BridgeType,
 )
 
@@ -61,17 +63,41 @@ CONF_MANUAL_PATH = "Enter Manually"
 _LOGGER = logging.getLogger(__name__)
 
 
+async def _supported_models(
+    device_type: AiriosDeviceType,
+) -> dict[ProductId, str]:
+    """
+    Get supported models to use in config_flow BindController/BindAccessory.
+
+    :param coordinator: Coordinator to Airios lib
+    :param prefix: filter for device types (use model property?)
+    :return: dict of supported models matching prefix
+    """
+    return {
+        item.product_id: ", ".join(item.description)
+        for item in await factory.model_descriptions()
+        if item.type == device_type
+    }
+
+
 class AiriosConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Airios."""
 
-    VERSION = 1  # Needs to be changed if a migrtion is necessary
+    VERSION = 1  # Needs to be changed if a migration is necessary
 
     _reconfigure_data: MappingProxyType[str, Any]
     _modbus_address: int
 
+    def is_matching(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        other_flow: Self,
+    ) -> bool:
+        """Return True if other_flow is matching this flow."""
+        raise NotImplementedError
+
     async def async_step_user(
         self,
-        user_input: dict[str, Any] | None = None,  # noqa: ARG002
+        user_input: dict[str, Any] | None = None,  # noqa: ARG002 # pylint: disable=unused-argument
     ) -> ConfigFlowResult:
         """Handle the initial step."""
         return self.async_show_menu(
@@ -233,14 +259,14 @@ class AiriosConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def _async_validate_bridge(self, api: Airios) -> int:
-        result = await api.bridge.node_product_id()
+        result = await api.bridge.device_product_id()
         if result.value != ProductId.BRDG_02R13:
             raise UnexpectedProductIdError
 
-        result = await api.bridge.node_rf_address()
-        if result is None or result.value is None:
+        result_rf_addr = await api.bridge.device_rf_address()
+        if result_rf_addr is None or result_rf_addr.value is None:
             raise UnexpectedProductIdError
-        bridge_rf_address = result.value
+        bridge_rf_address = result_rf_addr.value
 
         await self.async_set_unique_id(f"{bridge_rf_address}")
         if self.source == SOURCE_USER:
@@ -286,7 +312,7 @@ class AiriosConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_reconfigure(
         self,
-        user_input: dict[str, Any] | None = None,  # noqa: ARG002
+        user_input: dict[str, Any] | None = None,  # noqa: ARG002 # pylint: disable=unused-argument
     ) -> ConfigFlowResult:
         """Handle reconfiguration."""
         self._reconfigure_data = self._get_reconfigure_entry().data
@@ -294,7 +320,7 @@ class AiriosConfigFlow(ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:  # noqa: ARG004
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:  # noqa: ARG004 # pylint: disable=unused-argument
         """Get the options flow for this handler."""
         return OptionsFlowHandler()
 
@@ -302,7 +328,7 @@ class AiriosConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_supported_subentry_types(
         cls,
-        config_entry: ConfigEntry,  # noqa: ARG003
+        config_entry: ConfigEntry,  # noqa: ARG003 # pylint: disable=unused-argument
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return subentries supported by this handler."""
         return {
@@ -324,13 +350,17 @@ class OptionsFlowHandler(OptionsFlow):
         scan_interval = self.config_entry.options.get(
             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
         )
+        fetch_result = self.config_entry.options.get(
+            CONF_FETCH_RESULT_STATUS, DEFAULT_FETCH_RESULT_STATUS
+        )
 
         # Ethernet bridge closes connection when no communication for 3 mins
         opts_schema = vol.Schema(
             {
                 vol.Required(CONF_SCAN_INTERVAL, default=scan_interval): vol.All(
                     vol.Coerce(int), vol.Range(min=15, max=150)
-                )
+                ),
+                vol.Required(CONF_FETCH_RESULT_STATUS, default=fetch_result): bool,
             }
         )
         return self.async_show_form(step_id="init", data_schema=opts_schema)
@@ -356,16 +386,21 @@ class ControllerSubentryFlowHandler(ConfigSubentryFlow):
             self._name = user_input.get(CONF_NAME)
             try:
                 product = user_input[CONF_DEVICE]
-                product_id = SUPPORTED_UNITS.get(product)
-                self._bind_product_id = ProductId(product_id)
+                product_id = ProductId(product)
+                if product_id is None:
+                    errors["base"] = "unexpected_product_id"
+                else:
+                    self._bind_product_id = product_id
             except ValueError:
                 errors["base"] = "unexpected_product_id"
             return await self.async_step_do_bind_controller()
 
+        # Fetch supported models from library
+        ctrls = await _supported_models(AiriosDeviceType.CONTROLLER)
         bind_schema = vol.Schema(
             {
                 vol.Required(CONF_NAME): str,
-                vol.Required(CONF_DEVICE): vol.In(SUPPORTED_UNITS.keys()),
+                vol.Required(CONF_DEVICE): vol.In(ctrls),
                 vol.Optional(CONF_RF_ADDRESS): int,
             }
         )
@@ -390,7 +425,7 @@ class ControllerSubentryFlowHandler(ConfigSubentryFlow):
         nodes = await api.nodes()
         addrs = list(range(2, 200))
         for n in nodes:
-            addrs.remove(n.slave_id)
+            addrs.remove(n.modbus_address)
         modbus_address = addrs[0]
 
         _LOGGER.info(
@@ -405,7 +440,12 @@ class ControllerSubentryFlowHandler(ConfigSubentryFlow):
         # Bridge timeout is 20 seconds
         for _ in range(1, 100):
             await asyncio.sleep(0.250)
-            status = await api.bind_status()
+            result = await api.bind_status()
+            if result and result.value:
+                status = result.value
+            else:
+                msg = "Failed to get binding status"
+                raise AiriosBindingException(msg)
             _LOGGER.debug("Binding status: %s", str(status))
             if status != BindingStatus.OUTGOING_BINDING_INITIALIZED:
                 break
@@ -420,7 +460,7 @@ class ControllerSubentryFlowHandler(ConfigSubentryFlow):
 
     async def async_step_do_bind_controller(
         self,
-        user_input: dict[str, Any] | None = None,  # noqa: ARG002
+        user_input: dict[str, Any] | None = None,  # noqa: ARG002 # pylint: disable=unused-argument
     ) -> SubentryFlowResult:
         """Perform the controller binding while showing a progress form."""
         if self._bind_task is None:
@@ -447,7 +487,7 @@ class ControllerSubentryFlowHandler(ConfigSubentryFlow):
 
     async def async_step_bind_failed(
         self,
-        user_input: dict[str, Any] | None = None,  # noqa: ARG002
+        user_input: dict[str, Any] | None = None,  # noqa: ARG002 # pylint: disable=unused-argument
     ) -> SubentryFlowResult:
         """Bind failed."""
         if self._bind_result is not None:
@@ -458,7 +498,7 @@ class ControllerSubentryFlowHandler(ConfigSubentryFlow):
 
     async def async_step_bind_done(
         self,
-        user_input: dict[str, Any] | None = None,  # noqa: ARG002
+        user_input: dict[str, Any] | None = None,  # noqa: ARG002 # pylint: disable=unused-argument
     ) -> SubentryFlowResult:
         """Show the result of the bind step."""
         if self._bind_result is None:
@@ -475,7 +515,7 @@ class ControllerSubentryFlowHandler(ConfigSubentryFlow):
         coordinator: AiriosDataUpdateCoordinator = config_entry.runtime_data
         api = coordinator.api
         node = await api.node(self._modbus_address)
-        result = await node.node_rf_address()
+        result = await node.device_rf_address()
         if result is None or result.value is None:
             msg = "Unexpected error reading node RF address"
             raise AiriosBindingException(msg)
@@ -507,14 +547,15 @@ class AccessorySubentryFlowHandler(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Bind a new remote or sensor."""
 
-        def _show_form(
+        async def _show_form(
             bound_controllers: dict[Any, Any], errors: dict[str, str]
         ) -> SubentryFlowResult:
+            accs = await _supported_models(AiriosDeviceType.ACCESSORY)
             bind_schema = vol.Schema(
                 {
                     vol.Required(CONF_NAME): str,
                     vol.Required(CONF_ADDRESS): vol.In(bound_controllers),
-                    vol.Required(CONF_DEVICE): vol.In(SUPPORTED_ACCESSORIES.keys()),
+                    vol.Required(CONF_DEVICE): vol.In(accs),
                 }
             )
             return self.async_show_form(
@@ -528,18 +569,44 @@ class AccessorySubentryFlowHandler(ConfigSubentryFlow):
             for subentry in config_entry.subentries.values()
             if subentry.subentry_type == "controller"
         }
+
+        # Update bound controllers from api in case subentry is not available, possibly
+        # when configuring the integration and devices are already bound to the RF
+        # bridge.
+        coordinator: AiriosDataUpdateCoordinator = config_entry.runtime_data
+        api_bound_nodes = {
+            dev.modbus_address: ", ".join(dev.description)
+            for dev in await coordinator.api.nodes()
+            if dev.type == AiriosDeviceType.CONTROLLER
+            and dev.modbus_address not in bound_controllers
+        }
+
+        # Get the name from device registry for user convenience.
+        registry = dr.async_get(self.hass)
+        for key in api_bound_nodes:
+            if regdev := registry.async_get_device(identifiers={(DOMAIN, str(key))}):
+                if regdev.name_by_user:
+                    api_bound_nodes[key] = regdev.name_by_user
+                elif regdev.name:
+                    api_bound_nodes[key] = regdev.name
+
+        bound_controllers.update(api_bound_nodes)
+
         if user_input is not None:
             self._name = user_input[CONF_NAME]
             self._bind_controller_modbus_address = user_input[CONF_ADDRESS]
             try:
                 product = user_input[CONF_DEVICE]
-                product_id = SUPPORTED_ACCESSORIES.get(product)
-                self._bind_product_id = ProductId(product_id)
+                product_id = ProductId(product)
+                if product_id is None:
+                    errors["base"] = "unexpected_product_id"
+                    return await _show_form(bound_controllers, errors)
+                self._bind_product_id = product_id
             except ValueError:
                 errors["base"] = "unexpected_product_id"
-                return _show_form(bound_controllers, errors)
+                return await _show_form(bound_controllers, errors)
             return await self.async_step_do_bind_accessory()
-        return _show_form(bound_controllers, errors)
+        return await _show_form(bound_controllers, errors)
 
     async def _do_bind(self) -> None:
         if self._bind_product_id is None:
@@ -558,7 +625,7 @@ class AccessorySubentryFlowHandler(ConfigSubentryFlow):
         nodes = await api.nodes()
         addrs = list(range(2, 200))
         for n in nodes:
-            addrs.remove(n.slave_id)
+            addrs.remove(n.modbus_address)
         modbus_address = addrs[0]
 
         _LOGGER.info(
@@ -575,7 +642,12 @@ class AccessorySubentryFlowHandler(ConfigSubentryFlow):
         # Bridge timeout is 120 seconds
         for _ in range(1, 500):
             await asyncio.sleep(0.250)
-            status = await api.bind_status()
+            result = await api.bind_status()
+            if result and result.value:
+                status = result.value
+            else:
+                msg = "Failed to get binding status"
+                raise AiriosBindingException(msg)
             _LOGGER.debug("Binding status: %s", str(status))
             if status != BindingStatus.INCOMING_BINDING_ACTIVE:
                 break
@@ -590,7 +662,7 @@ class AccessorySubentryFlowHandler(ConfigSubentryFlow):
 
     async def async_step_do_bind_accessory(
         self,
-        user_input: dict[str, Any] | None = None,  # noqa: ARG002
+        user_input: dict[str, Any] | None = None,  # noqa: ARG002 # pylint: disable=unused-argument
     ) -> SubentryFlowResult:
         """Perform the accessory binding while showing a progress form."""
         if self._bind_task is None:
@@ -616,7 +688,7 @@ class AccessorySubentryFlowHandler(ConfigSubentryFlow):
 
     async def async_step_bind_failed(
         self,
-        user_input: dict[str, Any] | None = None,  # noqa: ARG002
+        user_input: dict[str, Any] | None = None,  # noqa: ARG002 # pylint: disable=unused-argument
     ) -> SubentryFlowResult:
         """Bind failed."""
         if self._bind_result is not None:
@@ -627,7 +699,7 @@ class AccessorySubentryFlowHandler(ConfigSubentryFlow):
 
     async def async_step_bind_done(
         self,
-        user_input: dict[str, Any] | None = None,  # noqa: ARG002
+        user_input: dict[str, Any] | None = None,  # noqa: ARG002 # pylint: disable=unused-argument
     ) -> SubentryFlowResult:
         """Show the result of the bind step."""
         if self._bind_result is None:
@@ -644,7 +716,7 @@ class AccessorySubentryFlowHandler(ConfigSubentryFlow):
         coordinator: AiriosDataUpdateCoordinator = config_entry.runtime_data
         api = coordinator.api
         node = await api.node(self._modbus_address)
-        result = await node.node_rf_address()
+        result = await node.device_rf_address()
         if result is None or result.value is None:
             msg = "Unexpected error reading node RF address"
             raise AiriosBindingException(msg)

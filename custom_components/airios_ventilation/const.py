@@ -2,8 +2,6 @@
 
 from enum import IntEnum, auto
 
-from pyairios import ProductId
-
 
 class BridgeType(IntEnum):
     """Type of RF bridge."""
@@ -15,7 +13,9 @@ class BridgeType(IntEnum):
 DOMAIN = "airios_ventilation"
 DEFAULT_NAME = "Airios"
 DEFAULT_SCAN_INTERVAL = 30
+DEFAULT_FETCH_RESULT_STATUS = False
 
+CONF_FETCH_RESULT_STATUS = "fetch_result_status"
 CONF_BRIDGE_RF_ADDRESS = "bridge_rf_address"
 CONF_RF_ADDRESS = "rf_address"
 CONF_DEFAULT_TYPE = BridgeType.SERIAL
@@ -27,13 +27,3 @@ CONF_DEFAULT_SERIAL_MODBUS_ADDRESS = 207
 # yet supported by pyairios library. Use the serial device address
 # in case a Modbus RTU - TCP gateway is used.
 CONF_DEFAULT_NETWORK_MODBUS_ADDRESS = 207
-
-
-SUPPORTED_UNITS: dict[str, ProductId] = {
-    "Siber DF Optima 2": ProductId.VMD_02RPS78,
-    "Siber DF EVO": ProductId.VMD_02RPS78,
-}
-
-SUPPORTED_ACCESSORIES: dict[str, ProductId] = {
-    "Siber 4 button remote": ProductId.VMN_05LM02,
-}

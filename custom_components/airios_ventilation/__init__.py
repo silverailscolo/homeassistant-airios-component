@@ -17,13 +17,30 @@ from homeassistant.const import (
 )
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
-from pyairios import Airios, AiriosRtuTransport, AiriosTcpTransport
+from pyairios import Airios
+from pyairios.client import (
+    AiriosBaseTransport,
+    AiriosRtuTransport,
+    AiriosTcpTransport,
+)
+from pyairios.properties import AiriosDeviceProperty
 
-from .const import DEFAULT_NAME, DEFAULT_SCAN_INTERVAL, DOMAIN, BridgeType
+from .const import (
+    CONF_FETCH_RESULT_STATUS,
+    DEFAULT_FETCH_RESULT_STATUS,
+    DEFAULT_NAME,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    BridgeType,
+)
 from .coordinator import AiriosDataUpdateCoordinator
+from .services import async_setup_services
 
 if typing.TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.typing import ConfigType
+    from pyairios.constants import ProductId
+    from pyairios.data_model import AiriosDeviceData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,14 +51,23 @@ PLATFORMS: list[Platform] = [
     Platform.NUMBER,
     Platform.SELECT,
     Platform.SENSOR,
+    Platform.SWITCH,
 ]
-
 
 type AiriosConfigEntry = ConfigEntry[AiriosDataUpdateCoordinator]
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: AiriosConfigEntry) -> bool:
-    """Set up Airios from a config entry."""
+async def async_setup(
+    hass: HomeAssistant,
+    config: ConfigType,  # noqa: ARG001 # pylint: disable=unused-argument
+) -> bool:
+    """Set up integration services."""
+    async_setup_services(hass)
+    return True
+
+
+def _get_transport(entry: AiriosConfigEntry) -> AiriosBaseTransport:
+    transport: AiriosBaseTransport | None = None
     bridge_type = entry.data[CONF_TYPE]
     if bridge_type == BridgeType.SERIAL:
         device = entry.data[CONF_DEVICE]
@@ -53,24 +79,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: AiriosConfigEntry) -> bo
     else:
         msg = f"Unexpected bridge type {bridge_type}"
         raise ConfigEntryError(msg)
+    return transport
 
+
+def _get_bridge_data(data: AiriosDeviceData) -> tuple[int, ProductId, str, int]:
+    if AiriosDeviceProperty.RF_ADDRESS not in data:
+        msg = "Failed to get bridge RF address"
+        raise ConfigEntryNotReady(msg)
+    bridge_rf_address = data[AiriosDeviceProperty.RF_ADDRESS].value
+
+    if AiriosDeviceProperty.PRODUCT_ID not in data:
+        msg = "Failed to get bridge product ID"
+        raise ConfigEntryNotReady(msg)
+    product_id = data[AiriosDeviceProperty.PRODUCT_ID].value
+
+    if AiriosDeviceProperty.PRODUCT_NAME not in data:
+        msg = "Failed to get bridge product name"
+        raise ConfigEntryNotReady(msg)
+    product_name = data[AiriosDeviceProperty.PRODUCT_NAME].value
+
+    if AiriosDeviceProperty.SOFTWARE_VERSION not in data:
+        msg = "Failed to get bridge software version"
+        raise ConfigEntryNotReady(msg)
+    sw_version = data[AiriosDeviceProperty.SOFTWARE_VERSION].value
+
+    return (bridge_rf_address, product_id, product_name, sw_version)
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: AiriosConfigEntry) -> bool:
+    """Set up Airios from a config entry."""
+    transport = _get_transport(entry)
     modbus_address = entry.data[CONF_ADDRESS]
     api = Airios(transport, modbus_address)
 
-    update_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-    coordinator = AiriosDataUpdateCoordinator(hass, api, update_interval)
+    coordinator = AiriosDataUpdateCoordinator(
+        hass,
+        api,
+        update_interval=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+        fetch_result_status=entry.options.get(
+            CONF_FETCH_RESULT_STATUS, DEFAULT_FETCH_RESULT_STATUS
+        ),
+    )
     await coordinator.async_config_entry_first_refresh()
 
-    bridge_rf_address = await api.bridge.node_rf_address()
-    if bridge_rf_address is None or bridge_rf_address.value is None:
-        msg = "Failed to get bridge RF address"
-        raise ConfigEntryNotReady(msg)
-    bridge_rf_address = bridge_rf_address.value
+    (rf_address, product_id, product_name, sw_version) = _get_bridge_data(
+        coordinator.data.nodes[coordinator.data.bridge_key]
+    )
 
-    if entry.unique_id != str(bridge_rf_address):
-        message = (
-            f"Unexpected device {bridge_rf_address} found, expected {entry.unique_id}"
-        )
+    if entry.unique_id != str(rf_address):
+        message = f"Unexpected device {rf_address} found, expected {entry.unique_id}"
         _LOGGER.error(message)
         raise ConfigEntryNotReady(message)
 
@@ -79,28 +136,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: AiriosConfigEntry) -> bo
 
     # Always register a device for the bridge. It is necessary to set the
     # via_device attribute for the bound nodes.
-    result = await api.bridge.node_product_name()
-    if result is None or result.value is None:
-        msg = "Node product name not available"
-        raise ConfigEntryNotReady(msg)
-    product_name = result.value
-
-    result = await api.bridge.node_product_id()
-    if result is None or result.value is None:
-        msg = "Node product ID not available"
-        raise ConfigEntryNotReady(msg)
-    product_id = result.value
-
-    result = await api.bridge.node_software_version()
-    if result is None or result.value is None:
-        msg = "Node software version not available"
-        raise ConfigEntryNotReady(msg)
-    sw_version = result.value
-
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, str(bridge_rf_address))},
+        identifiers={(DOMAIN, str(rf_address))},
         manufacturer=DEFAULT_NAME,
         name=product_name,
         model=product_name,
@@ -109,7 +148,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AiriosConfigEntry) -> bo
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
+    # sets up Airios fans, sensors etc.
     return True
 
 
