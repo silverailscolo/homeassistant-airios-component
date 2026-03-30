@@ -262,6 +262,9 @@
       "co2_setpoint": {
         "name": "CO2 Setpoint"
       },
+      "temperature_setpoint": {
+        "name": "Temperature setpoint"
+      },
       "error_code": {
         "name": "Error code",
         "state": {
@@ -324,6 +327,9 @@
       },
       "co2_setpoint": {
         "name": "CO2 setpoint"
+      },
+      "temperature_setpoint": {
+        "name": "Temperature setpoint"
       }
     },
     "switch": {

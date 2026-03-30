@@ -138,6 +138,20 @@ NUMBER_ENTITIES: tuple[AiriosNumberEntityDescription, ...] = (
         mode=NumberMode.BOX,
         set_value_fn=set_co2_setpoint,
     ),
+    # VMD15-RMS86 specific
+    AiriosNumberEntityDescription(
+        ap=AiriosVMDProperty.TEMPERATURE_CONTROL_SETPOINT,
+        key=AiriosVMDProperty.TEMPERATURE_CONTROL_SETPOINT.name.casefold(),
+        translation_key="temperature_setpoint",
+        native_min_value=0.0,
+        native_max_value=30.0,
+        device_class=NumberDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        native_step=1.0,
+        entity_category=EntityCategory.CONFIG,
+        mode=NumberMode.BOX,
+        set_value_fn=set_free_ventilation_setpoint,
+    ),
 )
 
 

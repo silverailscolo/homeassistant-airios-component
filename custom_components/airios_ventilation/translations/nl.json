@@ -262,6 +262,9 @@
       "co2_setpoint": {
         "name": "Doelwaarde CO2"
       },
+      "temperature_setpoint": {
+        "name": "Doelwaarde temperatuur"
+      },
       "error_code": {
         "name": "Foutcode",
         "state": {
@@ -324,6 +327,9 @@
       },
       "co2_setpoint": {
         "name": "Doelwaarde CO2"
+      },
+      "temperature_setpoint": {
+        "name": "Doelwaarde temperatuur"
       }
     },
     "switch": {
