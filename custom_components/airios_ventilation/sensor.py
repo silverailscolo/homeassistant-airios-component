@@ -347,6 +347,17 @@ SENSOR_ENTITIES: tuple[AiriosSensorEntityDescription, ...] = (
         native_unit_of_measurement=CONCENTRATION_PARTS_PER_MILLION,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
+    # VMD15-RMS86 specific
+    AiriosSensorEntityDescription(
+        ap=AiriosVMDProperty.TEMPERATURE_CONTROL_SETPOINT,
+        key=AiriosVMDProperty.TEMPERATURE_CONTROL_SETPOINT.name.casefold(),
+        translation_key="temperature_setpoint",
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        suggested_display_precision=1,
+        value_fn=temperature_value_fn,
+    ),
 )
 
 
